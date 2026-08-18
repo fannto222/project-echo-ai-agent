@@ -1,0 +1,53 @@
+name: Test Project Echo
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-short:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+
+      GEMINI_TEXT_MODEL: gemini-3.5-flash-lite
+      GEMINI_TTS_MODEL: gemini-2.5-flash-preview-tts
+      GEMINI_TTS_VOICE: Kore
+
+      MAX_MONTHLY_SPEND_EUR: "0"
+      ALLOW_PAID_APIS: "false"
+      ALLOW_PAID_ADS: "false"
+
+      CHANNEL_LANGUAGE: en
+      CHANNEL_NICHE: sci-fi mystery what-if storytelling
+      CHANNEL_BRAND: Project Echo
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Generate TEST Short
+        run: python -m src.main --kind short
+
+      - name: Upload generated Short
+        uses: actions/upload-artifact@v4
+        with:
+          name: project-echo-test-short
+          path: output/
+          retention-days: 1
