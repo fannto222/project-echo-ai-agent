@@ -552,15 +552,25 @@ Return ONLY JSON:
 
         # Final dependency is deliberately conservative: use the HIGHER of the first
         # trend-level estimate and the final evidence-level estimate.
-        final_ip_dependency = max(
-            signal["third_party_dependency"],
-            review["ip_dependency_score"],
-        )
+        signal_ip_score = signal["third_party_dependency"]
+        review_ip_score = review["ip_dependency_score"]
+        final_ip_dependency = max(signal_ip_score, review_ip_score)
+
+        # Pick the type belonging to the stronger dependency assessment.
+        if review_ip_score >= signal_ip_score:
+            final_ip_type = review["ip_dependency_type"]
+        else:
+            final_ip_type = signal["third_party_dependency_type"]
+
+        # V6.2 hard-block rule:
+        # A mere category label (e.g. "news_event" at score 15) is NOT enough to block.
+        # The dependency must be materially high.
         ip_hard_block = (
-            review["ip_dependency_detected"]
-            or final_ip_dependency > 25
-            or signal["third_party_dependency_type"] != "none"
-            or review["ip_dependency_type"] != "none"
+            final_ip_dependency >= 70
+            or (
+                review["ip_dependency_detected"]
+                and review_ip_score >= 60
+            )
         )
 
         dependency_safety = max(0.0, 100.0 - final_ip_dependency)
@@ -577,9 +587,22 @@ Return ONLY JSON:
             1,
         )
 
+        semantic_precision = len(relevant_rows) / max(1, len(candidates))
+
+        # In quota-efficient one-region mode, a single broad query can still provide
+        # strong evidence if it returns many clean, fast-moving, semantically matched videos.
+        strong_single_query_evidence = (
+            successful_queries >= 1
+            and len(relevant_rows) >= 8
+            and semantic_precision >= 0.80
+            and med >= 50
+            and peak >= 500
+        )
+        validation_pass = successful_queries >= 2 or strong_single_query_evidence
+
         qualified = (
             not ip_hard_block
-            and successful_queries >= 2
+            and validation_pass
             and len(relevant_rows) >= 5
             and signal["replication_fit"] >= 55
             and appeal >= 75
@@ -589,10 +612,12 @@ Return ONLY JSON:
         if ip_hard_block:
             rejection_reason = (
                 "IP_DEPENDENCY_HARD_BLOCK: audience demand materially depends on "
-                f"third-party {review['ip_dependency_type'] or signal['third_party_dependency_type']}."
+                f"third-party {final_ip_type} (dependency score {final_ip_dependency})."
             )
-        elif successful_queries < 2:
-            rejection_reason = "Not enough independently successful validation queries."
+        elif not validation_pass:
+            rejection_reason = (
+                "Trend validation was not broad/strong enough after semantic filtering."
+            )
         elif len(relevant_rows) < 5:
             rejection_reason = "Not enough semantically relevant recent videos."
         elif signal["replication_fit"] < 55:
@@ -613,11 +638,7 @@ Return ONLY JSON:
             "production_gap": review["production_gap"],
             "ip_dependency_hard_block": ip_hard_block,
             "ip_dependency_score": final_ip_dependency,
-            "ip_dependency_type_final": (
-                review["ip_dependency_type"]
-                if review["ip_dependency_type"] != "none"
-                else signal["third_party_dependency_type"]
-            ),
+            "ip_dependency_type_final": final_ip_type,
             "ip_dependency_reason": review["ip_dependency_reason"],
             "qualified": qualified,
             "rejection_reason": rejection_reason,
@@ -625,9 +646,9 @@ Return ONLY JSON:
                 "raw_candidate_videos": len(candidates),
                 "semantic_relevant_videos": len(relevant_rows),
                 "semantic_rejected_videos": len(candidates) - len(relevant_rows),
-                "semantic_precision": round(
-                    len(relevant_rows) / max(1, len(candidates)), 3
-                ),
+                "semantic_precision": round(semantic_precision, 3),
+                "strong_single_query_evidence": strong_single_query_evidence,
+                "validation_pass": validation_pass,
                 "successful_query_variants": successful_queries,
                 "total_query_variants": len(signal["validation_queries"]),
                 "regions_with_evidence": sorted(regions_with_evidence),
@@ -659,7 +680,7 @@ Return ONLY JSON:
             return {
                 "ready_to_produce": False,
                 "reason": (
-                    f"Only {len(qualified)} trend signal(s) passed V6 semantic, appeal, "
+                    f"Only {len(qualified)} trend signal(s) passed V6.2 semantic, appeal, "
                     "and zero-third-party-IP-dependency hard gates. Project Echo should "
                     "wait/recheck instead of forcing content."
                 ),
@@ -743,7 +764,7 @@ QUALIFIED SIGNALS:
 
         report = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "scout_version": "v6.1-ip-gate-quota-efficient",
+            "scout_version": "v6.2-balanced-ip-gate",
             "sources": [
                 "YouTube Data API v3 videos.list chart=mostPopular",
                 "YouTube Data API v3 search.list multi-query recent validation",
