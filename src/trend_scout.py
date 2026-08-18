@@ -14,9 +14,7 @@ from .config import Config
 
 YOUTUBE_API = "https://www.googleapis.com/youtube/v3"
 
-# Public categories that can contain repeatable, copyright-safe ideas.
-# Film/music/gaming/sports/news are not used as direct subject pools, but the model
-# may still identify a FORMAT pattern from safe categories without copying subjects.
+# Categories with a realistic chance of yielding copyright-safe, reproducible ideas.
 SAFE_CATEGORY_IDS = {"15", "22", "23", "24", "26", "27", "28"}
 
 
@@ -40,7 +38,13 @@ def _extract_json(text: str) -> dict:
 
 class YouTubeTrendScout:
     """
-    V4: trend-first editorial scout.
+    V5 trend scout.
+
+    Adds two hard filters on top of V4:
+    1. Semantic relevance: search results count only when they genuinely belong to
+       the trend being validated, not merely because a loose keyword matched.
+    2. Appeal preservation: Project Echo must be able to reproduce the CORE reason
+       viewers watch the trend with its zero-budget production stack.
 
     Automated sources:
     - YouTube Data API v3 mostPopular
@@ -117,16 +121,13 @@ class YouTubeTrendScout:
 You are the trend intelligence desk for a zero-budget faceless YouTube channel.
 Analyze CURRENT YouTube most-popular evidence.
 
-Separate two things:
-1. SUBJECT TREND = the actual topic/subject itself is attracting attention.
-2. FORMAT TREND = a repeatable presentation mechanic is attracting attention.
+Separate:
+1. SUBJECT TREND = the topic itself is attracting attention.
+2. FORMAT TREND = the repeatable presentation mechanic is attracting attention.
 3. HYBRID = both subject and format are reusable.
 
-We want trends we can exploit almost directly while still making wholly original
-content. Do NOT "sanitize" a hot trend so aggressively that the audience appeal
-disappears. If the original appeal depends on copyrighted IP, celebrity identity,
-sports footage, music/movie/game clips, current news, or another creator's footage,
-mark that as high copyright/dependency risk instead of inventing a dead replacement.
+We want trends Project Echo can exploit almost directly while still creating wholly
+original content. Do not sanitize a hot trend until its appeal disappears.
 
 Return ONLY JSON:
 {{
@@ -142,7 +143,7 @@ Return ONLY JSON:
         "query variant 2",
         "query variant 3"
       ],
-      "direct_safe_angle": "a close-to-the-trend original angle that preserves the appeal",
+      "direct_safe_angle": "close-to-trend original angle preserving the appeal",
       "replication_fit": 0,
       "copyright_dependency_risk": 0,
       "stock_footage_fit": 0,
@@ -154,15 +155,26 @@ Return ONLY JSON:
 
 Rules:
 - Return 5-8 signals.
-- validation_queries: 3-5 natural YouTube searches, each 2-7 words.
-- replication_fit 0-100 = can Project Echo reproduce the core appeal at €0?
-- copyright_dependency_risk 0-100 = how much the trend depends on protected IP/footage/identity.
-- stock_footage_fit 0-100 = can original narration + stock footage make the idea convincing?
+- validation_queries: 3-5 natural YouTube searches, 2-7 words each.
+- replication_fit 0-100 = can Project Echo recreate the core experience at €0?
+- copyright_dependency_risk 0-100.
+- stock_footage_fit 0-100.
 - initial_score 0-100.
-- Prefer signals appearing across multiple regions or multiple independent videos.
-- A viral copyrighted trailer breakdown can be a FORMAT signal, but should have high
-  copyright dependency if the subject itself is the franchise.
-- Do not propose the final video idea yet.
+- Prefer cross-region or multi-video patterns.
+- High copyrighted-IP dependence must be reflected in copyright risk.
+- Do NOT propose final video ideas yet.
+
+Project Echo's current production abilities:
+- original English script/narration
+- Gemini TTS
+- Pexels stock video
+- FFmpeg editing, captions, motion/crops
+- simple original graphics
+- simple screen-recorded ORIGINAL simulations only when feasible
+- no paid video generation
+- no actors/team
+- no copyrighted clips/music
+- no ability to recreate expensive real-world stunts
 
 EVIDENCE:
 {json.dumps(compact, ensure_ascii=False)}
@@ -244,13 +256,17 @@ EVIDENCE:
         for item in details.get("items", []):
             sn = item.get("snippet") or {}
             try:
-                age_h = max(1.0, (now - _parse_dt(sn.get("publishedAt"))).total_seconds() / 3600)
+                age_h = max(
+                    1.0,
+                    (now - _parse_dt(sn.get("publishedAt"))).total_seconds() / 3600
+                )
             except Exception:
                 continue
+
             views = int((item.get("statistics") or {}).get("viewCount") or 0)
             rows.append({
                 "video_id": item.get("id"),
-                "title": _safe_text(sn.get("title"), 130),
+                "title": _safe_text(sn.get("title"), 150),
                 "region": region,
                 "views": views,
                 "age_hours": round(age_h, 2),
@@ -258,80 +274,247 @@ EVIDENCE:
             })
         return rows
 
+    def _semantic_and_appeal_review(
+        self,
+        signal: dict,
+        candidates: list[dict],
+    ) -> dict:
+        """
+        One Gemini call per signal:
+        - assigns semantic relevance to each candidate result
+        - estimates whether Project Echo can preserve the original trend's core appeal
+        """
+        compact = [
+            {
+                "video_id": x["video_id"],
+                "title": x["title"],
+                "regions": sorted(x["regions"]),
+                "queries": sorted(x["matched_queries"]),
+                "views_per_hour": x["views_per_hour"],
+            }
+            for x in sorted(
+                candidates,
+                key=lambda y: y["views_per_hour"],
+                reverse=True,
+            )[:45]
+        ]
+
+        prompt = f"""
+You are validating ONE YouTube trend for Project Echo.
+
+TREND:
+{json.dumps(signal, ensure_ascii=False)}
+
+CANDIDATE RECENT SEARCH RESULTS:
+{json.dumps(compact, ensure_ascii=False)}
+
+Task A — SEMANTIC RELEVANCE
+A candidate counts ONLY if its actual title strongly supports the SAME subject/format
+trend described above. Loose keyword overlap is not enough.
+
+Examples:
+- Trend = sandbox-game zero-to-hero progression.
+  "I Built a Hidden Real-Life Tiny House" => NOT relevant.
+  "Minecraft Poor to Rich Challenge" => relevant.
+- Trend = real-life extreme game challenges.
+  An unrelated video that merely contains "challenge" => NOT relevant.
+
+Task B — APPEAL PRESERVATION
+Score 0-100 how much of the ORIGINAL viewer reward Project Echo can preserve using:
+- original English narration
+- Gemini TTS
+- Pexels stock footage
+- FFmpeg captions/motion
+- simple original graphics
+- simple ORIGINAL screen-recorded simulations only when feasible
+- no actors/team
+- no expensive real-world stunts
+- no copyrighted movie/game/music/sports clips
+- no paid video generation
+
+Do not confuse "we can talk ABOUT the trend" with "we can preserve why people watch it".
+If viewers watch to SEE Minecraft progression, but Project Echo can only narrate over
+generic stock footage, appeal preservation should be LOW.
+If the viral mechanic is a reveal/comparison/POV/explanation that stock footage and
+original graphics can genuinely deliver, it can be HIGH.
+
+Return ONLY JSON:
+{{
+  "candidate_reviews": [
+    {{
+      "video_id": "id",
+      "relevance_score": 0,
+      "relevant": true
+    }}
+  ],
+  "appeal_preservation_score": 0,
+  "appeal_preservation_reason": "brief reason",
+  "minimum_viable_execution": "what Project Echo would actually need to show",
+  "production_gap": "what crucial viral ingredient Project Echo cannot currently reproduce, or empty string"
+}}
+"""
+        response = self.gemini.models.generate_content(
+            model=self.cfg.gemini_text_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.1),
+        )
+        data = _extract_json(response.text)
+
+        reviews = {}
+        for item in data.get("candidate_reviews") or []:
+            vid = str(item.get("video_id") or "")
+            if not vid:
+                continue
+            score = max(0, min(100, int(item.get("relevance_score") or 0)))
+            reviews[vid] = {
+                "relevance_score": score,
+                "relevant": bool(item.get("relevant")) and score >= 70,
+            }
+
+        return {
+            "candidate_reviews": reviews,
+            "appeal_preservation_score": max(
+                0, min(100, int(data.get("appeal_preservation_score") or 0))
+            ),
+            "appeal_preservation_reason": _safe_text(
+                str(data.get("appeal_preservation_reason") or ""), 300
+            ),
+            "minimum_viable_execution": _safe_text(
+                str(data.get("minimum_viable_execution") or ""), 300
+            ),
+            "production_gap": _safe_text(
+                str(data.get("production_gap") or ""), 300
+            ),
+        }
+
     def _validate_signal(self, signal: dict) -> dict:
-        # Validate the same signal through multiple semantic queries and two markets.
         validation_regions = self.cfg.trend_regions[:2] or ["US"]
-        query_results = []
-        unique_videos: dict[str, dict] = {}
-        successful_queries = 0
-        regions_with_evidence = set()
+
+        # Gather candidates while remembering WHICH query and region produced them.
+        candidate_map: dict[str, dict] = {}
 
         for query in signal["validation_queries"]:
-            this_query_ids = set()
             for region in validation_regions:
-                rows = self._search_recent(query, region)
-                if rows:
-                    regions_with_evidence.add(region)
-                for row in rows:
+                for row in self._search_recent(query, region):
                     vid = row["video_id"]
-                    this_query_ids.add(vid)
-                    old = unique_videos.get(vid)
-                    if old is None or row["views_per_hour"] > old["views_per_hour"]:
-                        unique_videos[vid] = row
-            if len(this_query_ids) >= 2:
-                successful_queries += 1
-            query_results.append({
-                "query": query,
-                "unique_videos": len(this_query_ids),
-            })
+                    existing = candidate_map.get(vid)
+                    if existing is None:
+                        candidate_map[vid] = {
+                            **row,
+                            "regions": {region},
+                            "matched_queries": {query},
+                        }
+                    else:
+                        existing["regions"].add(region)
+                        existing["matched_queries"].add(query)
+                        if row["views_per_hour"] > existing["views_per_hour"]:
+                            existing["views_per_hour"] = row["views_per_hour"]
+                            existing["views"] = row["views"]
+                            existing["age_hours"] = row["age_hours"]
 
-        rows = list(unique_videos.values())
-        velocities = [x["views_per_hour"] for x in rows]
+        candidates = list(candidate_map.values())
+        review = self._semantic_and_appeal_review(signal, candidates)
+
+        relevant_rows = []
+        for row in candidates:
+            r = review["candidate_reviews"].get(row["video_id"])
+            if r and r["relevant"]:
+                relevant_rows.append({
+                    **row,
+                    "semantic_relevance_score": r["relevance_score"],
+                })
+
+        # Query breadth AFTER semantic filtering.
+        query_counts = {}
+        for query in signal["validation_queries"]:
+            ids = {
+                row["video_id"]
+                for row in relevant_rows
+                if query in row["matched_queries"]
+            }
+            query_counts[query] = len(ids)
+
+        successful_queries = sum(1 for n in query_counts.values() if n >= 2)
+
+        regions_with_evidence = set()
+        for row in relevant_rows:
+            regions_with_evidence.update(row["regions"])
+
+        velocities = [x["views_per_hour"] for x in relevant_rows]
         med = median(velocities) if velocities else 0.0
         peak = max(velocities) if velocities else 0.0
 
-        # Log momentum makes VPH meaningful without letting a single giant video dominate.
         momentum_score = min(100.0, 19.0 * math.log10(max(1.0, med) + 1.0))
         query_breadth_score = min(
-            100.0, (successful_queries / max(1, len(signal["validation_queries"]))) * 100.0
+            100.0,
+            (successful_queries / max(1, len(signal["validation_queries"]))) * 100.0,
         )
-        region_score = min(100.0, (len(regions_with_evidence) / max(1, len(validation_regions))) * 100.0)
+        region_score = min(
+            100.0,
+            (len(regions_with_evidence) / max(1, len(validation_regions))) * 100.0,
+        )
         safety_score = 100.0 - signal["copyright_dependency_risk"]
+        appeal = review["appeal_preservation_score"]
 
+        # Appeal preservation has substantial weight in V5.
         validated_score = round(
-            signal["initial_score"] * 0.10
-            + momentum_score * 0.30
-            + query_breadth_score * 0.15
-            + region_score * 0.10
-            + signal["replication_fit"] * 0.20
-            + safety_score * 0.10
-            + signal["stock_footage_fit"] * 0.05,
+            signal["initial_score"] * 0.07
+            + momentum_score * 0.23
+            + query_breadth_score * 0.12
+            + region_score * 0.08
+            + signal["replication_fit"] * 0.12
+            + safety_score * 0.08
+            + signal["stock_footage_fit"] * 0.05
+            + appeal * 0.25,
             1,
         )
 
         qualified = (
             successful_queries >= 2
-            and len(rows) >= 5
+            and len(relevant_rows) >= 5
             and signal["replication_fit"] >= 55
             and signal["copyright_dependency_risk"] <= 45
-            and validated_score >= 55
+            and appeal >= 75
+            and validated_score >= 60
         )
+
+        rejected_semantic = len(candidates) - len(relevant_rows)
 
         return {
             **signal,
             "validated_score": min(100.0, validated_score),
+            "appeal_preservation_score": appeal,
+            "appeal_preservation_reason": review["appeal_preservation_reason"],
+            "minimum_viable_execution": review["minimum_viable_execution"],
+            "production_gap": review["production_gap"],
             "qualified": qualified,
             "validation": {
+                "raw_candidate_videos": len(candidates),
+                "semantic_relevant_videos": len(relevant_rows),
+                "semantic_rejected_videos": rejected_semantic,
+                "semantic_precision": round(
+                    len(relevant_rows) / max(1, len(candidates)), 3
+                ),
                 "successful_query_variants": successful_queries,
                 "total_query_variants": len(signal["validation_queries"]),
-                "unique_recent_videos": len(rows),
                 "regions_with_evidence": sorted(regions_with_evidence),
                 "median_views_per_hour": round(med, 2),
                 "peak_views_per_hour": round(peak, 2),
-                "query_results": query_results,
-                "sample_titles": [
-                    x["title"]
-                    for x in sorted(rows, key=lambda y: y["views_per_hour"], reverse=True)[:6]
+                "query_results_after_semantic_filter": [
+                    {"query": q, "relevant_unique_videos": query_counts[q]}
+                    for q in signal["validation_queries"]
+                ],
+                "sample_relevant_titles": [
+                    {
+                        "title": x["title"],
+                        "semantic_relevance_score": x["semantic_relevance_score"],
+                        "views_per_hour": x["views_per_hour"],
+                    }
+                    for x in sorted(
+                        relevant_rows,
+                        key=lambda y: y["views_per_hour"],
+                        reverse=True,
+                    )[:6]
                 ],
             },
         }
@@ -339,13 +522,12 @@ EVIDENCE:
     def _build_editorial_plan(self, signals: list[dict]) -> dict:
         qualified = [s for s in signals if s.get("qualified")]
 
-        # Hard gate: do not fabricate a slate from a single weak trend.
         if len(qualified) < 2:
             return {
                 "ready_to_produce": False,
                 "reason": (
-                    f"Only {len(qualified)} independently validated, reproducible trend signal(s) "
-                    "passed the V4 gate. Project Echo should wait/recheck instead of forcing content."
+                    f"Only {len(qualified)} trend signal(s) passed V5 semantic relevance + "
+                    "appeal-preservation gates. Project Echo should wait/recheck instead of forcing content."
                 ),
                 "short_ideas": [],
                 "long_idea": None,
@@ -354,54 +536,51 @@ EVIDENCE:
         prompt = f"""
 You are the chief editor of Project Echo.
 
-Use ONLY the QUALIFIED live trend signals below. We need ideas that preserve the
-actual curiosity/reward mechanism of the trend. Do not turn a hot trend into an
-unrelated educational documentary merely because it is safer.
+Use ONLY the QUALIFIED V5 live trend signals below.
 
-For each idea:
-- stay close to the validated subject/format
+Critical rule:
+The final concept must preserve the SAME viewer reward measured by
+appeal_preservation_score. Do not turn gameplay/progression/stunts into a generic
+commentary video if the viewer originally watches to SEE the action.
+
+Every idea must:
+- stay close to the qualified subject/format
+- preserve the viral mechanic
 - be wholly original
-- no copied title/script/story
-- no celebrity/gossip dependency
-- no protected movie/game/music/sports/news footage
-- must be executable at €0 using original narration, stock footage, simple graphics,
-  screen-recorded original simulations where appropriate, and FFmpeg editing
-- if a trend cannot retain its appeal without copyrighted IP, DO NOT use it
-- favor concepts understandable in under one sentence
-- favor strong curiosity, challenge, transformation, comparison, POV, reveal, test,
-  ranking or visual-proof mechanics
+- use no copyrighted clips/music/characters
+- be executable at €0 with Project Echo's actual toolset
+- be understandable in one sentence
+- have a visible payoff/reveal/transformation/test/comparison/POV or proof
+- use at least 2 different trend signals across the 5 Shorts
 
 Return ONLY JSON:
 {{
   "ready_to_produce": true,
-  "reason": "why the slate is strong enough now",
+  "reason": "why the slate is genuinely producible now",
   "short_ideas": [
     {{
       "idea": "specific original concept",
-      "trend_signal": "matching qualified signal",
+      "trend_signal": "matching signal",
       "trend_type": "subject|format|hybrid",
       "hook": "first spoken line",
-      "viral_mechanic": "what keeps the viewer watching",
-      "why_now": "live evidence connection",
-      "production_method": "how to make it at €0",
+      "viral_mechanic": "what keeps viewers watching",
+      "visible_payoff": "what the viewer will actually SEE",
+      "production_method": "how Project Echo makes it at €0",
       "copyright_safe": true,
       "estimated_score": 0
     }}
   ],
   "long_idea": {{
-    "idea": "one specific original 6-9 minute concept",
+    "idea": "specific 6-9 minute concept",
     "trend_signal": "matching qualified signal",
     "hook": "cold open",
     "viral_mechanic": "retention engine",
-    "why_now": "live evidence connection",
+    "visible_payoff": "what viewers will see",
     "production_method": "€0 production method",
     "copyright_safe": true,
     "estimated_score": 0
   }}
 }}
-
-Give exactly 5 Short ideas, using at least 2 different qualified signals.
-Do NOT create five variants of the same concept.
 
 QUALIFIED SIGNALS:
 {json.dumps(qualified, ensure_ascii=False)}
@@ -409,7 +588,7 @@ QUALIFIED SIGNALS:
         response = self.gemini.models.generate_content(
             model=self.cfg.gemini_text_model,
             contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.6),
+            config=types.GenerateContentConfig(temperature=0.55),
         )
         plan = _extract_json(response.text)
         plan["ready_to_produce"] = bool(plan.get("ready_to_produce", True))
@@ -430,10 +609,12 @@ QUALIFIED SIGNALS:
         plan = self._build_editorial_plan(validated)
         report = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "scout_version": "v4-multi-query-hard-gate",
+            "scout_version": "v5-semantic-appeal-gate",
             "sources": [
                 "YouTube Data API v3 videos.list chart=mostPopular",
                 "YouTube Data API v3 search.list multi-query recent validation",
+                "Gemini semantic relevance filtering",
+                "Gemini appeal-preservation evaluation",
             ],
             "regions": self.cfg.trend_regions,
             "validation_regions": self.cfg.trend_regions[:2],
@@ -449,7 +630,10 @@ QUALIFIED SIGNALS:
 
         if out_path:
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+            out_path.write_text(
+                json.dumps(report, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
         return report
 
 
@@ -465,17 +649,22 @@ def main() -> None:
             "scout_version": report["scout_version"],
             "report": str(out),
             "qualified_signal_count": report["qualified_signal_count"],
-            "ready_to_produce": report.get("editorial_plan", {}).get("ready_to_produce", False),
+            "ready_to_produce": report.get(
+                "editorial_plan", {}
+            ).get("ready_to_produce", False),
             "top_signals": [
                 {
                     "name": x["name"],
                     "type": x["trend_type"],
                     "score": x.get("validated_score", 0),
+                    "appeal_preservation": x.get("appeal_preservation_score", 0),
                     "qualified": x.get("qualified", False),
                 }
                 for x in report["signals"][:6]
             ],
-            "short_ideas": report.get("editorial_plan", {}).get("short_ideas", [])[:5],
+            "short_ideas": report.get(
+                "editorial_plan", {}
+            ).get("short_ideas", [])[:5],
         },
         indent=2,
         ensure_ascii=False,
