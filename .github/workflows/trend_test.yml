@@ -1,21 +1,17 @@
-name: Test Project Echo
+name: Test Trend Scout
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-short:
+  trend-scout:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
 
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       YOUTUBE_DATA_API_KEY: ${{ secrets.YOUTUBE_DATA_API_KEY }}
-
       GEMINI_TEXT_MODEL: gemini-3.5-flash-lite
-      GEMINI_TTS_MODEL: gemini-2.5-flash-preview-tts
-      GEMINI_TTS_VOICE: Kore
 
       MAX_MONTHLY_SPEND_EUR: "0"
       ALLOW_PAID_APIS: "false"
@@ -40,20 +36,15 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install FFmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
-
       - name: Install Python packages
         run: pip install -r requirements.txt
 
-      - name: Generate TREND-LED test Short
-        run: python -m src.main --kind short
+      - name: Run Trend Scout
+        run: python -m src.trend_scout
 
-      - name: Upload generated Short
+      - name: Upload trend report
         uses: actions/upload-artifact@v4
         with:
-          name: project-echo-test-short
-          path: output/
+          name: project-echo-trend-report
+          path: output/trend_report.json
           retention-days: 1
