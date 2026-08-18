@@ -1,16 +1,15 @@
 name: Refresh YouTube analytics snapshot
 
+# DEVELOPMENT SAFETY: manual only until YouTube OAuth is connected.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '15 2 * * *'
 
 permissions:
   contents: write
 
 jobs:
   analytics:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}

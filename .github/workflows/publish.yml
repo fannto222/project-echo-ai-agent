@@ -1,5 +1,7 @@
 name: Generate and publish
 
+# DEVELOPMENT SAFETY:
+# Scheduled publishing stays disabled until YouTube OAuth is connected and V2 quality is approved.
 on:
   workflow_dispatch:
     inputs:
@@ -9,14 +11,6 @@ on:
         default: short
         type: choice
         options: [short, long]
-  schedule:
-    # UTC. In summer Europe/Rome is UTC+2; in winter these slots shift by one hour.
-    - cron: '30 9 * * *'   # Short
-    - cron: '30 12 * * *'  # Short
-    - cron: '30 15 * * *'  # Short
-    - cron: '0 18 * * *'   # Long
-    - cron: '0 20 * * *'   # Short
-    - cron: '0 22 * * *'   # Optional Short
 
 permissions:
   contents: write
@@ -50,33 +44,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-
       - name: Install system packages
         run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
-
       - name: Install Python packages
         run: pip install -r requirements.txt
-
-      - name: Resolve scheduled content type
-        id: kind
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ inputs.kind }}" >> "$GITHUB_OUTPUT"
-          elif [ "$(date -u +%H)" = "18" ]; then
-            echo "value=long" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=short" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Generate, render, and upload privately
-        run: python -m src.main --kind "${{ steps.kind.outputs.value }}" --upload
-
+        run: python -m src.main --kind "${{ inputs.kind }}" --upload
       - name: Save channel memory
         run: |
           git config user.name "youtube-ai-agent"
@@ -86,10 +63,9 @@ jobs:
             git commit -m "Update AI channel memory"
             git push
           fi
-
       - name: Keep production output as temporary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: latest-${{ steps.kind.outputs.value }}
+          name: latest-${{ inputs.kind }}
           path: output/
           retention-days: 1
