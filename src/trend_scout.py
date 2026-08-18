@@ -1,6 +1,7 @@
 import json
 import math
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
@@ -65,9 +66,43 @@ class YouTubeTrendScout:
 
     def _get(self, endpoint: str, params: dict) -> dict:
         params = {**params, "key": self.cfg.youtube_data_api_key}
-        r = self.session.get(f"{YOUTUBE_API}/{endpoint}", params=params, timeout=30)
-        r.raise_for_status()
-        return r.json()
+
+        last_message = ""
+        for attempt in range(4):
+            r = self.session.get(f"{YOUTUBE_API}/{endpoint}", params=params, timeout=30)
+
+            if r.status_code != 429:
+                r.raise_for_status()
+                return r.json()
+
+            try:
+                body = r.json()
+                err = body.get("error") or {}
+                last_message = str(err.get("message") or "")
+                reasons = [
+                    str(x.get("reason") or "")
+                    for x in (err.get("errors") or [])
+                    if isinstance(x, dict)
+                ]
+            except Exception:
+                last_message = r.text[:300]
+                reasons = []
+
+            # A short transient rate limit may recover. A daily/search quota will not,
+            # but a few small retries also make the diagnostic explicit in Actions.
+            if attempt < 3:
+                time.sleep((2, 5, 10)[attempt])
+                continue
+
+            reason_text = ", ".join(reasons) or "unknown"
+            raise RuntimeError(
+                "YouTube Data API search rate/quota limit reached (HTTP 429). "
+                f"reason={reason_text}; message={last_message}. "
+                "Project Echo stopped safely; no video was generated. "
+                "Check Google Cloud YouTube Data API quotas or retry after the quota resets."
+            )
+
+        raise RuntimeError("YouTube Data API request failed after rate-limit retries.")
 
     def _popular_region(self, region: str) -> list[dict]:
         data = self._get(
@@ -242,7 +277,7 @@ EVIDENCE:
                 "format_pattern": _safe_text(str(s.get("format_pattern") or ""), 250),
                 "subject_pattern": _safe_text(str(s.get("subject_pattern") or ""), 180),
                 "why_it_is_moving": _safe_text(str(s.get("why_it_is_moving") or ""), 250),
-                "validation_queries": queries[:5],
+                "validation_queries": queries[:3],
                 "direct_safe_angle": _safe_text(str(s.get("direct_safe_angle") or ""), 260),
                 "replication_fit": max(0, min(100, int(s.get("replication_fit") or 0))),
                 "copyright_dependency_risk": max(
@@ -450,7 +485,7 @@ Return ONLY JSON:
         }
 
     def _validate_signal(self, signal: dict) -> dict:
-        validation_regions = self.cfg.trend_regions[:2] or ["US"]
+        validation_regions = self.cfg.trend_regions[:1] or ["US"]
         candidate_map: dict[str, dict] = {}
 
         for query in signal["validation_queries"]:
@@ -708,7 +743,7 @@ QUALIFIED SIGNALS:
 
         report = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "scout_version": "v6-ip-dependency-hard-gate",
+            "scout_version": "v6.1-ip-gate-quota-efficient",
             "sources": [
                 "YouTube Data API v3 videos.list chart=mostPopular",
                 "YouTube Data API v3 search.list multi-query recent validation",
@@ -717,7 +752,8 @@ QUALIFIED SIGNALS:
                 "Gemini third-party IP/identity dependency hard gate",
             ],
             "regions": self.cfg.trend_regions,
-            "validation_regions": self.cfg.trend_regions[:2],
+            "validation_regions": self.cfg.trend_regions[:1],
+            "search_budget_strategy": "max 3 search queries per signal, 1 validation region; mostPopular discovery remains US/GB/CA/AU",
             "lookback_hours": self.cfg.trend_lookback_hours,
             "automation_note": (
                 "TikTok Creative Center is not scraped. TikTok confirmation remains omitted "
