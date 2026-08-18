@@ -24,15 +24,35 @@ def concat_audio(parts: list[Path], out: Path) -> None:
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listing), "-c:a", "pcm_s16le", str(out)])
 
 
-def _sentences(text: str) -> list[str]:
-    items = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
-    return items or [text.strip()]
+def _caption_chunks(text: str, portrait: bool) -> list[str]:
+    clean = re.sub(r"\s+", " ", text.strip())
+    words = clean.split()
+    if not words:
+        return [""]
+
+    max_words = 4 if portrait else 7
+    min_words = 2 if portrait else 4
+    chunks, cur = [], []
+
+    for word in words:
+        cur.append(word)
+        ends_phrase = bool(re.search(r"[,.!?;:]$", word))
+        if len(cur) >= max_words or (ends_phrase and len(cur) >= min_words):
+            chunks.append(" ".join(cur))
+            cur = []
+
+    if cur:
+        if chunks and len(cur) == 1:
+            chunks[-1] += " " + cur[0]
+        else:
+            chunks.append(" ".join(cur))
+    return chunks
 
 
-def make_srt(text: str, total_seconds: float, out: Path) -> None:
-    items = _sentences(text)
-    weights = [max(1, len(x.split())) for x in items]
-    total_w = sum(weights)
+def make_srt(text: str, total_seconds: float, out: Path, portrait: bool) -> None:
+    items = _caption_chunks(text, portrait)
+    weights = [max(1, len(re.findall(r"\b\w+\b", x))) for x in items]
+    total_w = max(1, sum(weights))
     cursor = 0.0
 
     def ts(sec: float) -> str:
@@ -43,36 +63,57 @@ def make_srt(text: str, total_seconds: float, out: Path) -> None:
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
     blocks = []
-    for i, (sentence, w) in enumerate(zip(items, weights), start=1):
+    for i, (phrase, w) in enumerate(zip(items, weights), start=1):
         seg = total_seconds * (w / total_w)
+        if portrait:
+            seg = max(0.62, min(1.75, seg))
         end = min(total_seconds, cursor + seg)
-        blocks.append(f"{i}\n{ts(cursor)} --> {ts(end)}\n{sentence}\n")
+        caption = phrase.upper() if portrait else phrase
+        blocks.append(f"{i}\n{ts(cursor)} --> {ts(end)}\n{caption}\n")
         cursor = end
+        if cursor >= total_seconds:
+            break
+
+    if blocks and cursor < total_seconds:
+        lines = blocks[-1].splitlines()
+        start = lines[1].split(" --> ")[0]
+        lines[1] = f"{start} --> {ts(total_seconds)}"
+        blocks[-1] = "\n".join(lines) + "\n"
+
     out.write_text("\n".join(blocks), encoding="utf-8")
 
 
 def render_video(clips: list[Path], voice: Path, narration: str, out: Path, portrait: bool) -> None:
+    if not clips:
+        raise RuntimeError("No clips available for rendering")
+
     out.parent.mkdir(parents=True, exist_ok=True)
     work = out.parent / "segments"
     work.mkdir(exist_ok=True)
     voice_dur = duration(voice)
 
     width, height = (720, 1280) if portrait else (1280, 720)
-    segment_len = max(2.5, min(6.0, voice_dur / max(1, len(clips))))
+    if portrait:
+        segment_len = min(2.45, max(1.65, voice_dur / max(1, len(clips))))
+    else:
+        segment_len = max(3.5, min(5.5, voice_dur / max(1, len(clips))))
+
     needed = max(1, math.ceil(voice_dur / segment_len))
     sequence = [clips[i % len(clips)] for i in range(needed)]
 
     seg_paths = []
     vf = (
         f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},setsar=1,fps=30,format=yuv420p"
+        f"crop={width}:{height},setsar=1,fps=30,"
+        "eq=contrast=1.04:saturation=1.05,format=yuv420p"
     )
     for i, clip in enumerate(sequence):
         seg = work / f"seg_{i:03d}.mp4"
+        seek = (i % 3) * 0.65
         run([
-            "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(clip),
+            "ffmpeg", "-y", "-ss", f"{seek:.2f}", "-stream_loop", "-1", "-i", str(clip),
             "-t", f"{segment_len:.3f}", "-an", "-vf", vf,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", str(seg)
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(seg)
         ])
         seg_paths.append(seg)
 
@@ -82,17 +123,30 @@ def render_video(clips: list[Path], voice: Path, narration: str, out: Path, port
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(base)])
 
     srt = out.parent / "captions.srt"
-    make_srt(narration, voice_dur, srt)
-    font_size = 36 if portrait else 24
-    margin_v = 110 if portrait else 55
-    style = f"FontName=DejaVu Sans,FontSize={font_size},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV={margin_v}"
+    make_srt(narration, voice_dur, srt, portrait=portrait)
+
+    if portrait:
+        style = (
+            "FontName=DejaVu Sans,FontSize=22,Bold=-1,"
+            "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+            "BorderStyle=1,Outline=3,Shadow=0,Alignment=2,"
+            "MarginL=88,MarginR=88,MarginV=230"
+        )
+    else:
+        style = (
+            "FontName=DejaVu Sans,FontSize=24,Bold=-1,"
+            "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+            "BorderStyle=1,Outline=3,Shadow=0,Alignment=2,"
+            "MarginL=60,MarginR=60,MarginV=55"
+        )
+
     escaped = str(srt.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
     run([
         "ffmpeg", "-y", "-i", str(base), "-i", str(voice),
         "-t", f"{voice_dur:.3f}",
         "-vf", f"subtitles='{escaped}':force_style='{style}'",
         "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out)
     ])
 

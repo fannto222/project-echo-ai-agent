@@ -23,9 +23,13 @@ class PexelsClient:
 
     @staticmethod
     def _choose_file(video: dict, portrait: bool) -> dict | None:
-        files = [f for f in video.get("video_files", []) if f.get("file_type") == "video/mp4" and f.get("link")]
+        files = [
+            f for f in video.get("video_files", [])
+            if f.get("file_type") == "video/mp4" and f.get("link")
+        ]
         if not files:
             return None
+
         def score(f):
             w, h = f.get("width") or 0, f.get("height") or 0
             orient_bonus = 1_000_000 if ((h >= w) == portrait) else 0
@@ -33,45 +37,96 @@ class PexelsClient:
             pixels = w * h
             size_penalty = abs(pixels - target)
             return orient_bonus - size_penalty
+
         return max(files, key=score)
 
-    def collect(self, search_terms: list[str], out_dir: Path, portrait: bool, wanted: int) -> tuple[list[Path], list[dict]]:
+    @staticmethod
+    def _safe_term(term: str) -> str:
+        return " ".join(term.strip().split())[:100]
+
+    def _download_video(
+        self,
+        video: dict,
+        term: str,
+        out_dir: Path,
+        portrait: bool,
+        seen: set[str],
+    ) -> tuple[Path, dict] | None:
+        vid = str(video.get("id") or "")
+        if not vid or vid in seen:
+            return None
+        chosen = self._choose_file(video, portrait)
+        if not chosen:
+            return None
+
+        seen.add(vid)
+        name = hashlib.sha1((vid + chosen["link"]).encode()).hexdigest()[:12] + ".mp4"
+        path = out_dir / name
+        with requests.get(chosen["link"], stream=True, timeout=60) as r:
+            r.raise_for_status()
+            with open(path, "wb") as f:
+                for chunk in r.iter_content(1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+        user = video.get("user") or {}
+        credit = {
+            "pexels_video_id": video.get("id"),
+            "creator": user.get("name", "Unknown creator"),
+            "creator_url": user.get("url", ""),
+            "pexels_url": video.get("url", ""),
+            "search_term": term,
+        }
+        return path, credit
+
+    def collect(
+        self,
+        search_terms: list[str],
+        out_dir: Path,
+        portrait: bool,
+        wanted: int,
+    ) -> tuple[list[Path], list[dict]]:
         out_dir.mkdir(parents=True, exist_ok=True)
         orientation = "portrait" if portrait else "landscape"
+        terms = [self._safe_term(t) for t in search_terms if self._safe_term(t)]
         clips, credits, seen = [], [], set()
+        cached: dict[str, list[dict]] = {}
 
-        for term in search_terms:
+        # One clip per story beat first.
+        for term in terms:
             if len(clips) >= wanted:
                 break
-            for video in self.search(term, orientation, per_page=10):
+            results = self.search(term, orientation, per_page=8)
+            cached[term] = results
+            for video in results:
+                item = self._download_video(video, term, out_dir, portrait, seen)
+                if item:
+                    path, credit = item
+                    clips.append(path)
+                    credits.append(credit)
+                    break
+
+        # Only then fill remaining slots, rotating across terms.
+        if len(clips) < wanted:
+            for result_index in range(1, 8):
+                for term in terms:
+                    if len(clips) >= wanted:
+                        break
+                    results = cached.get(term, [])
+                    if result_index >= len(results):
+                        continue
+                    item = self._download_video(results[result_index], term, out_dir, portrait, seen)
+                    if item:
+                        path, credit = item
+                        clips.append(path)
+                        credits.append(credit)
                 if len(clips) >= wanted:
                     break
-                vid = str(video.get("id"))
-                if not vid or vid in seen:
-                    continue
-                chosen = self._choose_file(video, portrait)
-                if not chosen:
-                    continue
-                seen.add(vid)
-                ext = ".mp4"
-                name = hashlib.sha1((vid + chosen["link"]).encode()).hexdigest()[:12] + ext
-                path = out_dir / name
-                with requests.get(chosen["link"], stream=True, timeout=60) as r:
-                    r.raise_for_status()
-                    with open(path, "wb") as f:
-                        for chunk in r.iter_content(1024 * 1024):
-                            if chunk:
-                                f.write(chunk)
-                clips.append(path)
-                user = video.get("user") or {}
-                credits.append({
-                    "pexels_video_id": video.get("id"),
-                    "creator": user.get("name", "Unknown creator"),
-                    "creator_url": user.get("url", ""),
-                    "pexels_url": video.get("url", ""),
-                    "search_term": term,
-                })
+
         if not clips:
             raise RuntimeError("Pexels returned no usable clips. Try broader search terms.")
-        (out_dir / "credits.json").write_text(json.dumps(credits, indent=2), encoding="utf-8")
+
+        (out_dir / "credits.json").write_text(
+            json.dumps(credits, indent=2), encoding="utf-8"
+        )
         return clips, credits

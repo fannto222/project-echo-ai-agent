@@ -12,7 +12,15 @@ class Config:
     gemini_text_model: str = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.5-flash-lite")
     gemini_tts_model: str = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
     gemini_tts_voice: str = os.getenv("GEMINI_TTS_VOICE", "Kore")
+
     pexels_api_key: str = os.getenv("PEXELS_API_KEY", "")
+
+    # Public trend research key. This is NOT the YouTube OAuth upload credential.
+    youtube_data_api_key: str = os.getenv("YOUTUBE_DATA_API_KEY", "")
+    trend_regions_raw: str = os.getenv("TREND_REGIONS", "US,GB,CA,AU")
+    trend_language: str = os.getenv("TREND_LANGUAGE", "en")
+    trend_lookback_hours: int = int(os.getenv("TREND_LOOKBACK_HOURS", "48"))
+    trend_max_signals: int = int(os.getenv("TREND_MAX_SIGNALS", "6"))
 
     youtube_client_id: str = os.getenv("YOUTUBE_CLIENT_ID", "")
     youtube_client_secret: str = os.getenv("YOUTUBE_CLIENT_SECRET", "")
@@ -26,8 +34,16 @@ class Config:
     allow_paid_ads: bool = _bool("ALLOW_PAID_ADS", False)
 
     channel_language: str = os.getenv("CHANNEL_LANGUAGE", "en")
-    channel_niche: str = os.getenv("CHANNEL_NICHE", "sci-fi mystery what-if storytelling")
+    channel_niche: str = os.getenv(
+        "CHANNEL_NICHE",
+        "trend-led faceless storytelling, curiosity, visual explainers, POV, mystery and science"
+    )
     channel_brand: str = os.getenv("CHANNEL_BRAND", "Project Echo")
+
+    @property
+    def trend_regions(self) -> list[str]:
+        items = [x.strip().upper() for x in self.trend_regions_raw.split(",") if x.strip()]
+        return items[:6] or ["US"]
 
     def validate_zero_budget(self) -> None:
         if self.max_monthly_spend_eur != 0:
@@ -35,18 +51,25 @@ class Config:
         if self.allow_paid_apis or self.allow_paid_ads:
             raise RuntimeError("Safety stop: paid APIs/ads are disabled in the zero-budget build.")
 
-    def validate_generation(self) -> None:
+    def validate_trends(self) -> None:
         self.validate_zero_budget()
         if not self.gemini_api_key:
             raise RuntimeError("Missing GEMINI_API_KEY")
+        if not self.youtube_data_api_key:
+            raise RuntimeError("Missing YOUTUBE_DATA_API_KEY")
+
+    def validate_generation(self) -> None:
+        self.validate_trends()
         if not self.pexels_api_key:
             raise RuntimeError("Missing PEXELS_API_KEY")
 
     def validate_youtube(self) -> None:
-        missing = [name for name, value in {
-            "YOUTUBE_CLIENT_ID": self.youtube_client_id,
-            "YOUTUBE_CLIENT_SECRET": self.youtube_client_secret,
-            "YOUTUBE_REFRESH_TOKEN": self.youtube_refresh_token,
-        }.items() if not value]
+        missing = [
+            name for name, value in {
+                "YOUTUBE_CLIENT_ID": self.youtube_client_id,
+                "YOUTUBE_CLIENT_SECRET": self.youtube_client_secret,
+                "YOUTUBE_REFRESH_TOKEN": self.youtube_refresh_token,
+            }.items() if not value
+        ]
         if missing:
             raise RuntimeError("Missing YouTube secrets: " + ", ".join(missing))
