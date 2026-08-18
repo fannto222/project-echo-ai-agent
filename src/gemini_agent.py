@@ -34,12 +34,11 @@ class GeminiAgent:
             length = "STRICTLY 60-82 spoken words, designed for 28-43 seconds. Never exceed 82 narration words."
             structure = (
                 "hook in the first sentence, immediate payoff, fast escalation, one clear thread, "
-                "final twist/question in the last sentence"
+                "final reveal/twist/question in the last sentence"
             )
             search_rule = (
                 "Return 14-18 concrete Pexels-friendly shot searches in STORY ORDER. "
-                "Each phrase must describe a visible real-world shot. Avoid abstract concepts, brands, "
-                "celebrities, copyrighted characters, movie/game names and impossible CGI-only scenes."
+                "Each phrase must describe a visible real-world shot."
             )
         else:
             length = "800-1100 spoken words, roughly 6-9 minutes"
@@ -50,26 +49,39 @@ class GeminiAgent:
             )
 
         if trend_report:
-            slate = trend_report.get("editorial_plan") or {}
-            idea_pool = slate.get("short_ideas") if kind == "short" else [slate.get("long_idea")]
+            editorial = trend_report.get("editorial_plan") or {}
+            if not editorial.get("ready_to_produce"):
+                raise RuntimeError(
+                    "Trend safety stop: V4 Trend Scout did not find enough independently "
+                    "validated reproducible signals. Do not generate filler content."
+                )
+
+            idea_pool = editorial.get("short_ideas") if kind == "short" else [editorial.get("long_idea")]
             idea_pool = [x for x in (idea_pool or []) if x]
+            if not idea_pool:
+                raise RuntimeError("Trend safety stop: editorial slate is empty.")
+
             trend_context = json.dumps(
                 {
-                    "top_signals": trend_report.get("signals", [])[:5],
+                    "qualified_signals": [
+                        x for x in trend_report.get("signals", []) if x.get("qualified")
+                    ][:5],
                     "idea_pool": idea_pool,
                 },
                 ensure_ascii=False,
             )
+
             source_instruction = f"""
-Choose ONE idea from the live trend-derived idea_pool below. You may improve the angle,
-but you MUST stay connected to the selected live signal. Do not invent an unrelated topic.
-Do not copy any evidence/sample title. The output must be wholly original and feasible with stock footage.
+Choose ONE concept from idea_pool. Preserve its viral_mechanic and its connection to
+the live trend. You may sharpen the execution, but do not drift into an unrelated
+documentary/explainer. The result must remain original and copyright-safe.
+
 LIVE TREND CONTEXT:
 {trend_context}
 """
         else:
             source_instruction = (
-                "No live trend report was provided. Create one original concept inside the channel niche."
+                "No live trend report was provided. Create one original concept inside the channel direction."
             )
 
         prompt = f"""
@@ -78,28 +90,28 @@ Channel direction: {self.cfg.channel_niche}.
 
 {source_instruction}
 
-Hard safety rules:
+Hard safety:
+- no copied titles/scripts/stories
 - no celebrity/gossip dependency
 - no copyrighted fictional universes/characters
-- no copied titles/scripts/stories
-- no music/movie/game/sports footage dependency
+- no protected music/movie/game/sports footage
 - no current political/news reporting
 - no medical/legal/financial advice
-- clearly label fiction when fictional
+- label fiction when fictional
 
 Target narration length: {length}
 Structure: {structure}
-Do not repeat these previous channel topics: {json.dumps(used[-40:])}
+Do not repeat previous channel topics: {json.dumps(used[-40:])}
 {search_rule}
 
-Return ONLY valid JSON:
+Return ONLY JSON:
 {{
   "topic": "short internal topic label",
-  "trend_signal": "live trend signal used, or empty string",
+  "trend_signal": "qualified live trend signal used, or empty string",
   "title": "original YouTube-ready English title",
-  "description": "2-4 sentence English description; do not include asset credits yet",
+  "description": "2-4 sentence description; no asset credits yet",
   "narration": "complete English narration",
-  "search_terms": ["ordered concrete stock-footage searches"],
+  "search_terms": ["ordered stock-footage searches"],
   "tags": ["5-12 relevant tags"],
   "contains_realistic_synthetic_media": false,
   "fiction_disclaimer": "short sentence if fictional, otherwise empty string"
@@ -109,9 +121,10 @@ Return ONLY valid JSON:
             response = self.client.models.generate_content(
                 model=self.cfg.gemini_text_model,
                 contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.75 if attempt == 0 else 0.45),
+                config=types.GenerateContentConfig(temperature=0.72 if attempt == 0 else 0.4),
             )
             plan = _extract_json(response.text)
+
             if kind != "short":
                 return self._validate_plan(plan)
 
@@ -119,7 +132,7 @@ Return ONLY valid JSON:
             if 55 <= wc <= 82:
                 return self._validate_plan(plan)
 
-            prompt += f"\nYour previous narration was {wc} words. Rewrite it to 60-82 spoken words exactly."
+            prompt += f"\nPrevious narration was {wc} words. Rewrite to exactly 60-82 spoken words."
 
         raise RuntimeError("Gemini could not produce a Short within the 60-82 word safety range.")
 

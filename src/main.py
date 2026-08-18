@@ -42,6 +42,11 @@ def main():
     trend_report = None
     if not args.skip_trends:
         trend_report = YouTubeTrendScout(cfg).run(out / "trend_report.json")
+        if not (trend_report.get("editorial_plan") or {}).get("ready_to_produce"):
+            raise RuntimeError(
+                "V4 Trend Scout says WAIT: not enough independently validated, reproducible "
+                "trends. No video was generated."
+            )
 
     agent = GeminiAgent(cfg)
     plan = agent.create_content_plan(args.kind, trend_report=trend_report)
@@ -56,8 +61,7 @@ def main():
 
     if args.kind == "short" and voice_seconds > 48:
         raise RuntimeError(
-            f"Short safety stop: narration audio is {voice_seconds:.1f}s. "
-            "Expected <= 48s. Regenerate instead of publishing an overlong Short."
+            f"Short safety stop: narration audio is {voice_seconds:.1f}s. Expected <= 48s."
         )
 
     portrait = args.kind == "short"
@@ -79,6 +83,7 @@ def main():
         "script": {"source": "Gemini API free tier", "original_for_channel": True},
         "trend_research": {
             "source": "YouTube Data API v3 official public endpoints",
+            "scout_version": (trend_report or {}).get("scout_version"),
             "trend_signal_used": plan.get("trend_signal", ""),
             "tiktok_scraping_used": False,
         },
@@ -91,7 +96,7 @@ def main():
         ),
         "max_spend_eur": cfg.max_monthly_spend_eur,
         "voice_duration_seconds": round(voice_seconds, 2),
-        "editor_version": "v3-trend-led-fast-shorts",
+        "editor_version": "v4-trend-hard-gate-fast-shorts",
     }
     (out / "rights_ledger.json").write_text(
         json.dumps(rights, indent=2, ensure_ascii=False), encoding="utf-8"
